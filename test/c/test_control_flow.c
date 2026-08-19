@@ -750,10 +750,11 @@ cleanup:
 // body = QuantumCircuit(2)
 // body.rx(i, 0)
 // body.cx(0, 1)
-// qc.for_loop(range(0, 5, 1), i, body, [0, 1], [])
+// qc = QuantumCircuit(3)
+// qc.for_loop(range(0, 5, 1), i, body, [2, 0], [])
 static int test_build_for_loop_over_range(void) {
     int result = Ok;
-    QkCircuit *circuit = qk_circuit_new(2, 0);
+    QkCircuit *circuit = qk_circuit_new(3, 0);
     QkParam *param = qk_param_new_symbol("i");
     QkCircuit *body = qk_circuit_new(2, 0);
     QkControlFlowInstruction *cf_inst = NULL;
@@ -764,7 +765,7 @@ static int test_build_for_loop_over_range(void) {
     qk_circuit_gate(body, QkGate_CX, body_qubits, NULL);
 
     QkLoopParam loop_param = {QkLoopParamKind_Parameter, {.parameter = param}};
-    uint32_t qubits[2] = {0, 1};
+    uint32_t qubits[2] = {2, 0};
 
     QkExitCode exit_code =
         qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 1, loop_param);
@@ -780,9 +781,35 @@ static int test_build_for_loop_over_range(void) {
         goto cleanup;
     }
 
+    // The body is copied, so the caller's circuit is untouched and the loop outlives it.
+    if (qk_circuit_num_instructions(body) != 2) {
+        printf("Expected the body to still hold 2 instructions, got %zu\n",
+               qk_circuit_num_instructions(body));
+        result = EqualityError;
+        goto cleanup;
+    }
+    qk_circuit_free(body);
+    body = NULL;
+
     cf_inst = qk_circuit_get_control_flow_instruction(circuit, 0, NULL);
     if (qk_control_flow_kind(cf_inst) != QkControlFlowKind_ForLoop) {
         printf("Expected ForLoop, got %u\n", qk_control_flow_kind(cf_inst));
+        result = EqualityError;
+        goto cleanup;
+    }
+
+    const QkCircuit *block = qk_control_flow_block_circuit(cf_inst, 0);
+    if (qk_circuit_num_instructions(block) != 2) {
+        printf("Expected the copied body to hold 2 instructions, got %zu\n",
+               qk_circuit_num_instructions(block));
+        result = EqualityError;
+        goto cleanup;
+    }
+
+    const uint32_t *qubit_map = qk_control_flow_qubit_map(cf_inst);
+    if (qubit_map[0] != 2 || qubit_map[1] != 0) {
+        printf("Expected the body's qubits to map onto [2, 0], got [%u, %u]\n", qubit_map[0],
+               qubit_map[1]);
         result = EqualityError;
         goto cleanup;
     }
@@ -817,17 +844,6 @@ static int test_build_for_loop_over_range(void) {
         result = EqualityError;
     }
     qk_str_free(symbol_info.name);
-    if (result != Ok) {
-        goto cleanup;
-    }
-
-    // The body is copied, so the caller's circuit is untouched.
-    if (qk_circuit_num_instructions(body) != 2) {
-        printf("Expected the body to still hold 2 instructions, got %zu\n",
-               qk_circuit_num_instructions(body));
-        result = EqualityError;
-        goto cleanup;
-    }
 
 cleanup:
     if (cf_inst != NULL) {
@@ -898,10 +914,110 @@ static int test_build_for_loop_over_elements(void) {
         goto cleanup;
     }
 
-    // The body is copied, so the caller's circuit is untouched.
-    if (qk_circuit_num_instructions(body) != 2) {
-        printf("Expected the body to still hold 2 instructions, got %zu\n",
-               qk_circuit_num_instructions(body));
+cleanup:
+    if (cf_inst != NULL) {
+        qk_control_flow_instruction_free(cf_inst);
+    }
+    qk_circuit_free(body);
+    qk_circuit_free(circuit);
+    qk_param_free(param);
+    return result;
+}
+
+// Every input a for-loop can get wrong is rejected before the circuit is touched.
+static int test_build_for_loop_invalid_input(void) {
+    int result = Ok;
+    QkCircuit *circuit = qk_circuit_new(2, 0);
+    QkCircuit *body = qk_circuit_new(2, 0);
+    QkParam *not_a_symbol = qk_param_from_double(1.0);
+
+    uint32_t body_qubits[2] = {0, 1};
+    qk_circuit_gate(body, QkGate_CX, body_qubits, NULL);
+    uint32_t qubits[2] = {0, 1};
+
+    QkLoopParam no_param = {QkLoopParamKind_NoLoopParam, {.parameter = NULL}};
+    QkExitCode exit_code =
+        qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 0, no_param);
+    if (exit_code != QkExitCode_ZeroLoopStep) {
+        printf("Expected QkExitCode_ZeroLoopStep for a zero step, got exit code %u\n", exit_code);
+        result = EqualityError;
+        goto cleanup;
+    }
+
+    QkLoopParam value_param = {QkLoopParamKind_Parameter, {.parameter = not_a_symbol}};
+    exit_code = qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 1, value_param);
+    if (exit_code != QkExitCode_ParameterError) {
+        printf("Expected QkExitCode_ParameterError for a loop parameter that is not a symbol, "
+               "got exit code %u\n",
+               exit_code);
+        result = EqualityError;
+        goto cleanup;
+    }
+
+    // A QkVar cannot be built from C yet, so the kind alone is enough to be rejected.
+    QkLoopParam var_param = {QkLoopParamKind_Variable, {.variable = NULL}};
+    exit_code = qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 1, var_param);
+    if (exit_code != QkExitCode_NotImplemented) {
+        printf("Expected QkExitCode_NotImplemented for a loop variable, got exit code %u\n",
+               exit_code);
+        result = EqualityError;
+        goto cleanup;
+    }
+
+    if (qk_circuit_num_instructions(circuit) != 0) {
+        printf("Expected no instruction to be appended, got %zu\n",
+               qk_circuit_num_instructions(circuit));
+        result = EqualityError;
+    }
+
+cleanup:
+    qk_circuit_free(body);
+    qk_circuit_free(circuit);
+    qk_param_free(not_a_symbol);
+    return result;
+}
+
+// Without a loop parameter the body's own parameter stays free, so it becomes a parameter of the
+// outer circuit instead of being bound on each iteration:
+// i = Parameter("i")
+// body = QuantumCircuit(2)
+// body.rx(i, 0)
+// qc.for_loop([1, 3, 7], None, body, [0, 1], [])
+static int test_build_for_loop_without_loop_param(void) {
+    int result = Ok;
+    QkCircuit *circuit = qk_circuit_new(2, 0);
+    QkParam *param = qk_param_new_symbol("i");
+    QkCircuit *body = qk_circuit_new(2, 0);
+    QkControlFlowInstruction *cf_inst = NULL;
+
+    uint32_t body_qubits[2] = {0, 1};
+    const QkParam *rx_params[1] = {param};
+    qk_circuit_parameterized_gate(body, QkGate_RX, body_qubits, rx_params);
+
+    ptrdiff_t values[3] = {1, 3, 7};
+    QkLoopElements elements = {values, 3};
+    QkLoopParam loop_param = {QkLoopParamKind_NoLoopParam, {.parameter = NULL}};
+    uint32_t qubits[2] = {0, 1};
+
+    QkExitCode exit_code =
+        qk_circuit_for_loop_elements(circuit, body, qubits, NULL, elements, loop_param);
+    if (exit_code != QkExitCode_Success) {
+        printf("Expected the for-loop to be appended, got exit code %u\n", exit_code);
+        result = RuntimeError;
+        goto cleanup;
+    }
+
+    cf_inst = qk_circuit_get_control_flow_instruction(circuit, 0, NULL);
+    if (qk_control_flow_loop_param_kind(cf_inst) != QkLoopParamKind_NoLoopParam) {
+        printf("Expected loop parameter kind to be QkLoopParamKind_NoLoopParam, got %d\n",
+               qk_control_flow_loop_param_kind(cf_inst));
+        result = EqualityError;
+        goto cleanup;
+    }
+
+    if (qk_circuit_num_param_symbols(circuit) != 1) {
+        printf("Expected the body's parameter to be a parameter of the outer circuit, got %zu\n",
+               qk_circuit_num_param_symbols(circuit));
         result = EqualityError;
         goto cleanup;
     }
@@ -953,6 +1069,8 @@ int test_control_flow(void) {
     num_failed += RUN_TEST(test_while_on_register_large_condition);
     num_failed += RUN_TEST(test_build_for_loop_over_range);
     num_failed += RUN_TEST(test_build_for_loop_over_elements);
+    num_failed += RUN_TEST(test_build_for_loop_invalid_input);
+    num_failed += RUN_TEST(test_build_for_loop_without_loop_param);
 
     fflush(stderr);
     fprintf(stderr, "=== Number of failed subtests: %i\n", num_failed);
