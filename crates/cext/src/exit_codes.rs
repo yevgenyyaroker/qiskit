@@ -44,6 +44,8 @@ pub enum ExitCode {
     DuplicateIndexError = 104,
     /// Invalid ``QkOperationKind``.
     InvalidOperationKind = 105,
+    /// The step of a ``for`` loop range is zero.
+    ZeroLoopStep = 106,
     /// Error related to arithmetic operations or similar.
     ArithmeticError = 200,
     /// Mismatching number of qubits.
@@ -72,6 +74,8 @@ pub enum ExitCode {
     ParameterError = 600,
     /// Parameter name conflict.
     ParameterNameConflict = 601,
+    /// The requested functionality is not implemented yet.
+    NotImplemented = 700,
 }
 
 impl From<ArithmeticError> for ExitCode {

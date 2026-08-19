@@ -270,15 +270,43 @@ pub enum CLoopCollectionType {
 
 /// A struct containing loop elements from a ForLoop control flow instruction.
 ///
-/// This struct is returned by `qk_control_flow_loop_elements` and contains both
-/// a pointer to the array of loop elements and the number of elements in the array.
-/// The pointer is borrowed and must not be freed by the caller.
+/// This struct is returned by ``qk_control_flow_loop_elements``, and is also used to specify the
+/// elements when building a for-loop with ``qk_circuit_for_loop_elements``. It contains both a
+/// pointer to the array of loop elements and the number of elements in the array. The pointer is
+/// borrowed in both directions and is never freed by the receiver.
 #[repr(C)]
 pub struct CLoopElements {
     /// Pointer to the array of loop elements.
-    elements: *const isize,
+    pub(crate) elements: *const isize,
     /// Number of elements in the array.
-    len: usize,
+    pub(crate) len: usize,
+}
+
+/// A union to hold the loop variable of a ForLoop.
+///
+/// This union is part of the ``QkLoopParam`` struct and should not be used directly.
+#[repr(C)]
+pub union CLoopParamValue {
+    /// The loop parameter (active when ``kind`` in ``QkLoopParam`` is ``QkLoopParamKind_Parameter``)
+    pub(crate) parameter: *const Param,
+    /// The loop variable (active when ``kind`` in ``QkLoopParam`` is ``QkLoopParamKind_Variable``)
+    pub(crate) variable: *const Var,
+}
+
+/// The loop variable of a ForLoop, if it has one.
+///
+/// The ``kind`` field acts as a discriminant that determines which field of the ``value`` union
+/// is active. When ``kind`` is ``QkLoopParamKind_NoLoopParam``, ``value`` is unused.
+///
+/// Building a for-loop with a ``QkLoopParamKind_Variable`` loop variable is not supported yet, as
+/// a ``QkVar`` cannot be constructed from C; ``qk_circuit_for_loop_range`` and
+/// ``qk_circuit_for_loop_elements`` return ``QkExitCode_NotImplemented`` for it.
+#[repr(C)]
+pub struct CLoopParam {
+    /// The kind of loop variable (discriminant for the union)
+    pub(crate) kind: CLoopParamKind,
+    /// The loop variable
+    pub(crate) value: CLoopParamValue,
 }
 
 /// @ingroup QkControlFlow

@@ -11,13 +11,14 @@
 // that they have been altered from the originals.
 
 use std::ffi::{CStr, CString, c_char};
+use std::num::NonZero;
 use std::ptr;
 
 use crate::circuit_library::pbc::{CPauliProductMeasurement, CPauliProductRotation};
-use crate::control_flow::CControlFlowInstruction;
+use crate::control_flow::{CControlFlowInstruction, CLoopElements, CLoopParam, CLoopParamKind};
 use crate::dag::COperationKind;
 use crate::exit_codes::ExitCode;
-use crate::pointers::{const_ptr_as_ref, mut_ptr_as_ref};
+use crate::pointers::{const_ptr_as_ref, mut_ptr_as_ref, slice_from_ptr};
 use crate::transpiler::target::parse_params;
 
 use nalgebra::{Matrix2, Matrix4};
@@ -32,8 +33,9 @@ use qiskit_circuit::dag_circuit::DAGCircuit;
 use qiskit_circuit::instruction::Parameters;
 use qiskit_circuit::interner::Interner;
 use qiskit_circuit::operations::{
-    ArrayType, DelayUnit, Operation, OperationRef, Param, PauliBased, PauliProductMeasurement,
-    PauliProductRotation, StandardGate, StandardInstruction, UnitaryGate,
+    ArrayType, ControlFlow, ControlFlowInstruction, DelayUnit, ForCollection, LoopParam, Operation,
+    OperationRef, Param, PauliBased, PauliProductMeasurement, PauliProductRotation, PyRange,
+    StandardGate, StandardInstruction, UnitaryGate,
 };
 use qiskit_circuit::packed_instruction::{PackedInstruction, PackedOperation};
 use qiskit_circuit::parameter_table::ParameterTableError;
@@ -2400,6 +2402,268 @@ pub unsafe extern "C" fn qk_circuit_delay(
     ExitCode::Success
 }
 
+/// @ingroup QkCircuit
+/// Append a ``for`` loop over a range of values to a circuit.
+///
+/// The body is executed once for every value in the half-open range ``[start, stop)``, stepping
+/// by ``step``, following the same convention as Python's ``range``. All three may be negative,
+/// and a range that yields no values (such as ``start = 5`` and ``stop = 0`` with a positive
+/// ``step``) is valid, appending a loop whose body never executes.
+///
+/// If ``loop_param`` names a parameter, the current value of the range is bound to it on each
+/// iteration; the parameter must be the same ``QkParam`` that was used to build the body, since
+/// two parameters with the same name are still distinct. It is bound at runtime, so it does not
+/// become a parameter of ``circuit``.
+///
+/// This function copies ``body`` upon appending it, so the caller retains ownership of the
+/// ``QkCircuit`` body and must free it with ``qk_circuit_free`` once it is no longer needed.
+/// ``loop_param`` is likewise borrowed, not consumed.
+///
+/// Building a loop whose ``loop_param.kind`` is ``QkLoopParamKind_Variable`` is not supported
+/// yet, since a ``QkVar`` cannot be constructed from C.
+///
+/// @param circuit A pointer to the circuit to append the loop to.
+/// @param body A pointer to the circuit to use as the body of the loop.
+/// @param qubits A pointer to an array of ``uint32_t`` qubit indices in ``circuit``, of length
+///     ``qk_circuit_num_qubits(body)``, mapping the body's qubits onto ``circuit``'s qubits.
+/// @param clbits A pointer to an array of ``uint32_t`` clbit indices in ``circuit``, of length
+///     ``qk_circuit_num_clbits(body)``, mapping the body's clbits onto ``circuit``'s clbits.
+/// @param start The first value of the range.
+/// @param stop The value the range stops before.
+/// @param step The difference between successive values. This may be negative, but must not be
+///     zero.
+/// @param loop_param The loop variable to bind each value to, if any.
+///
+/// @return ``QkExitCode_Success`` upon successful append. Upon failure,
+///     ``QkExitCode_ZeroLoopStep`` indicates a zero ``step``,
+///     ``QkExitCode_NotImplemented`` a ``QkLoopParamKind_Variable`` loop variable,
+///     ``QkExitCode_ParameterError`` a ``loop_param`` that is not a plain parameter symbol, and
+///     ``QkExitCode_ParameterNameConflict`` that a new parameter symbol has a name conflict with
+///     an existing one.
+///
+/// # Example
+/// ```c
+///     QkCircuit *qc = qk_circuit_new(2, 0);
+///
+///     QkCircuit *body = qk_circuit_new(2, 0);
+///     uint32_t body_qubits[2] = {0, 1};
+///     qk_circuit_gate(body, QkGate_CX, body_qubits, NULL);
+///
+///     QkLoopParam loop_param = {QkLoopParamKind_NoLoopParam, {.parameter = NULL}};
+///     uint32_t qubits[2] = {0, 1};
+///     qk_circuit_for_loop_range(qc, body, qubits, NULL, 0, 5, 1, loop_param);
+///
+///     qk_circuit_free(body);
+///     qk_circuit_free(qc);
+/// ```
+///
+/// # Safety
+///
+/// ``qubits`` and ``clbits`` must be arrays of ``uint32_t`` of length
+/// ``qk_circuit_num_qubits(body)`` and ``qk_circuit_num_clbits(body)`` respectively, containing
+/// valid qubit/clbit indices into ``circuit``. Behavior is undefined otherwise.
+///
+/// The ``kind`` field of ``loop_param`` must correctly discriminate its union; if it holds a
+/// parameter, that must be a valid, non-null pointer to a ``QkParam``.
+///
+/// Behavior is undefined if ``circuit`` or ``body`` is not a valid, non-null pointer to a
+/// ``QkCircuit``.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qk_circuit_for_loop_range(
+    circuit: *mut CircuitData,
+    body: *const CircuitData,
+    qubits: *const u32,
+    clbits: *const u32,
+    start: i64,
+    stop: i64,
+    step: i64,
+    loop_param: CLoopParam,
+) -> ExitCode {
+    let Some(step) = NonZero::new(step as isize) else {
+        return ExitCode::ZeroLoopStep;
+    };
+
+    let collection = ForCollection::PyRange(PyRange {
+        start: start as isize,
+        stop: stop as isize,
+        step,
+    });
+
+    // SAFETY: Per documentation, the pointers are valid for their documented lengths and
+    // the tag correctly discriminates the union.
+    unsafe { push_for_loop(circuit, body, qubits, clbits, collection, loop_param) }
+}
+
+/// @ingroup QkCircuit
+/// Append a ``for`` loop over an explicit list of values to a circuit.
+///
+/// The body is executed once for every value in ``elements``, in order. An empty ``elements``
+/// is valid, appending a loop whose body never executes.
+///
+/// If ``loop_param`` names a parameter, the current value is bound to it on each iteration; the
+/// parameter must be the same ``QkParam`` that was used to build the body, since two parameters
+/// with the same name are still distinct. It is bound at runtime, so it does not become a
+/// parameter of ``circuit``.
+///
+/// This function copies ``body`` upon appending it, so the caller retains ownership of the
+/// ``QkCircuit`` body and must free it with ``qk_circuit_free`` once it is no longer needed.
+/// The ``elements`` array and ``loop_param`` are likewise borrowed, not consumed.
+///
+/// Building a loop whose ``loop_param.kind`` is ``QkLoopParamKind_Variable`` is not supported
+/// yet, since a ``QkVar`` cannot be constructed from C.
+///
+/// @param circuit A pointer to the circuit to append the loop to.
+/// @param body A pointer to the circuit to use as the body of the loop.
+/// @param qubits A pointer to an array of ``uint32_t`` qubit indices in ``circuit``, of length
+///     ``qk_circuit_num_qubits(body)``, mapping the body's qubits onto ``circuit``'s qubits.
+/// @param clbits A pointer to an array of ``uint32_t`` clbit indices in ``circuit``, of length
+///     ``qk_circuit_num_clbits(body)``, mapping the body's clbits onto ``circuit``'s clbits.
+/// @param elements The values to iterate over. This is the same struct that
+///     ``qk_control_flow_loop_elements`` returns.
+/// @param loop_param The loop variable to bind each value to, if any.
+///
+/// @return ``QkExitCode_Success`` upon successful append. Upon failure,
+///     ``QkExitCode_NotImplemented`` indicates a ``QkLoopParamKind_Variable`` loop variable,
+///     ``QkExitCode_ParameterError`` a ``loop_param`` that is not a plain parameter symbol, and
+///     ``QkExitCode_ParameterNameConflict`` that a new parameter symbol has a name conflict with
+///     an existing one.
+///
+/// # Example
+/// ```c
+///     QkCircuit *qc = qk_circuit_new(2, 0);
+///
+///     QkCircuit *body = qk_circuit_new(2, 0);
+///     uint32_t body_qubits[2] = {0, 1};
+///     qk_circuit_gate(body, QkGate_CX, body_qubits, NULL);
+///
+///     ptrdiff_t values[3] = {1, 3, 7};
+///     QkLoopElements elements = {values, 3};
+///     QkLoopParam loop_param = {QkLoopParamKind_NoLoopParam, {.parameter = NULL}};
+///     uint32_t qubits[2] = {0, 1};
+///     qk_circuit_for_loop_elements(qc, body, qubits, NULL, elements, loop_param);
+///
+///     qk_circuit_free(body);
+///     qk_circuit_free(qc);
+/// ```
+///
+/// # Safety
+///
+/// ``elements.elements`` must be an array of at least ``elements.len`` ``ptrdiff_t`` values. This
+/// can be a null pointer if ``elements.len`` is zero.
+///
+/// ``qubits`` and ``clbits`` must be arrays of ``uint32_t`` of length
+/// ``qk_circuit_num_qubits(body)`` and ``qk_circuit_num_clbits(body)`` respectively, containing
+/// valid qubit/clbit indices into ``circuit``. Behavior is undefined otherwise.
+///
+/// The ``kind`` field of ``loop_param`` must correctly discriminate its union; if it holds a
+/// parameter, that must be a valid, non-null pointer to a ``QkParam``.
+///
+/// Behavior is undefined if ``circuit`` or ``body`` is not a valid, non-null pointer to a
+/// ``QkCircuit``.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qk_circuit_for_loop_elements(
+    circuit: *mut CircuitData,
+    body: *const CircuitData,
+    qubits: *const u32,
+    clbits: *const u32,
+    elements: CLoopElements,
+    loop_param: CLoopParam,
+) -> ExitCode {
+    // SAFETY: Per documentation, elements.elements is valid for elements.len reads.
+    let elements = unsafe { slice_from_ptr(elements.elements, elements.len) };
+    let collection = ForCollection::List(elements.to_vec());
+
+    // SAFETY: Per documentation, the pointers are valid for their documented lengths and
+    // the tag correctly discriminates the union.
+    unsafe { push_for_loop(circuit, body, qubits, clbits, collection, loop_param) }
+}
+
+/// Append a `for` loop over `collection` to `circuit`, using `body` as the loop body.
+///
+/// This is the shared implementation of `qk_circuit_for_loop_range` and
+/// `qk_circuit_for_loop_elements`; the caller builds the collection and this appends the
+/// instruction.
+///
+/// The data is copied out of `body`, which is left untouched.
+///
+/// # Safety
+///
+/// `qubits` and `clbits` must be valid for `body.num_qubits()` and `body.num_clbits()` reads of
+/// `u32` respectively, holding valid bit indices into `circuit`.
+///
+/// `loop_param.kind` must correctly discriminate `loop_param.value`. When it is
+/// `CLoopParamKind::Parameter`, `loop_param.value.parameter` must be a valid, non-null pointer
+/// to a [Param].
+///
+/// `circuit` and `body` must be valid, non-null pointers to a [CircuitData].
+pub(crate) unsafe fn push_for_loop(
+    circuit: *mut CircuitData,
+    body: *const CircuitData,
+    qubits: *const u32,
+    clbits: *const u32,
+    collection: ForCollection,
+    loop_param: CLoopParam,
+) -> ExitCode {
+    let loop_param = match loop_param.kind {
+        CLoopParamKind::NoLoopParam => None,
+        CLoopParamKind::Parameter => {
+            // SAFETY: Per documentation, kind discriminates the union and the parameter pointer
+            // is valid.
+            let param = unsafe { const_ptr_as_ref(loop_param.value.parameter) };
+            let Param::ParameterExpression(expr) = param else {
+                return ExitCode::ParameterError;
+            };
+            let Ok(symbol) = expr.try_to_symbol() else {
+                return ExitCode::ParameterError;
+            };
+            Some(LoopParam::Parameter(symbol))
+        }
+        // A `QkVar` cannot be constructed from C yet.
+        CLoopParamKind::Variable => return ExitCode::NotImplemented,
+    };
+
+    // SAFETY: Per documentation, the pointers are non-null and aligned.
+    let circuit = unsafe { mut_ptr_as_ref(circuit) };
+    let body = unsafe { const_ptr_as_ref(body) };
+
+    let num_qubits = body.num_qubits() as u32;
+    let num_clbits = body.num_clbits() as u32;
+
+    // SAFETY: Per documentation, qubits/clbits point to arrays of at least num_qubits/num_clbits
+    // uint32_t elements.
+    let qargs: Vec<Qubit> = unsafe { slice_from_ptr(qubits, num_qubits as usize) }
+        .iter()
+        .map(|&q| Qubit(q))
+        .collect();
+    let cargs: Vec<Clbit> = unsafe { slice_from_ptr(clbits, num_clbits as usize) }
+        .iter()
+        .map(|&c| Clbit(c))
+        .collect();
+
+    let for_block = circuit.add_block(body.clone());
+    let for_op = PackedOperation::from(ControlFlowInstruction {
+        control_flow: ControlFlow::ForLoop {
+            collection,
+            loop_param,
+        },
+        num_qubits,
+        num_clbits,
+    });
+
+    match circuit.push_packed_operation(
+        for_op,
+        Some(Parameters::Blocks(vec![for_block])),
+        &qargs,
+        &cargs,
+    ) {
+        Ok(()) => ExitCode::Success,
+        Err(CircuitDataError::ParameterTableError(ParameterTableError::NameConflict(_))) => {
+            ExitCode::ParameterNameConflict
+        }
+        Err(_) => ExitCode::ParameterError,
+    }
+}
+
 /// The configuration options for the ``qk_circuit_draw`` function.
 #[repr(C)]
 pub struct CircuitDrawerConfig {
@@ -2753,10 +3017,12 @@ pub unsafe extern "C" fn qk_control_flow_instruction_free(cf_inst: *mut CControl
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::control_flow::{CLoopParamKind, CLoopParamValue};
+    use crate::param::{qk_param_free, qk_param_new_symbol};
     use qiskit_circuit::{
         bit::{ClassicalRegister, QuantumRegister, ShareableClbit, ShareableQubit},
         circuit_data::CircuitData,
-        operations::Param,
+        operations::{ForCollection, LoopParam, Param},
     };
     use std::mem::MaybeUninit;
 
@@ -2799,5 +3065,159 @@ mod test {
 
         assert_eq!(out_bits[1], 1); // Bit was explicitly added to the circuit
         assert_eq!(out_bits[0], u32::MAX); // Bit was not added to the circuit
+    }
+
+    /// Build a two-qubit body containing `rx(param, 0); cx(0, 1)`.
+    fn parameterized_body(param: *const Param) -> *mut CircuitData {
+        let body = qk_circuit_new(2, 0);
+        let qubits = [0_u32, 1];
+        let params = [param];
+        unsafe {
+            qk_circuit_parameterized_gate(body, StandardGate::RX, qubits.as_ptr(), params.as_ptr());
+            qk_circuit_gate(body, StandardGate::CX, qubits.as_ptr(), ptr::null());
+        }
+        body
+    }
+
+    #[test]
+    fn test_circuit_for_loop_range() {
+        let circuit = qk_circuit_new(3, 0);
+        let name = CString::new("i").unwrap();
+        let param = unsafe { qk_param_new_symbol(name.as_ptr()) };
+        let body = parameterized_body(param);
+
+        let qubits = [2_u32, 0];
+        let loop_param = CLoopParam {
+            kind: CLoopParamKind::Parameter,
+            value: CLoopParamValue { parameter: param },
+        };
+        let exit_code = unsafe {
+            qk_circuit_for_loop_range(
+                circuit,
+                body,
+                qubits.as_ptr(),
+                ptr::null(),
+                0,
+                5,
+                1,
+                loop_param,
+            )
+        };
+        assert_eq!(exit_code, ExitCode::Success);
+
+        let circuit_ref = unsafe { const_ptr_as_ref(circuit) };
+        assert_eq!(circuit_ref.data().len(), 1);
+
+        let inst = &circuit_ref.data()[0];
+        assert_eq!(circuit_ref.get_qargs(inst.qubits), [Qubit(2), Qubit(0)]);
+
+        let OperationRef::ControlFlow(cf_inst) = inst.op.view() else {
+            panic!("expected a control flow instruction")
+        };
+        let ControlFlow::ForLoop {
+            collection,
+            loop_param,
+        } = &cf_inst.control_flow
+        else {
+            panic!("expected a for loop")
+        };
+        let ForCollection::PyRange(range) = collection else {
+            panic!("expected a range collection")
+        };
+        assert_eq!(range.start, 0);
+        assert_eq!(range.stop, 5);
+        assert_eq!(range.step.get(), 1);
+
+        let Some(LoopParam::Parameter(symbol)) = loop_param else {
+            panic!("expected a parameter loop variable")
+        };
+        assert_eq!(symbol.name(), "i");
+
+        // The loop variable is runtime-bound, so it is not a parameter of the outer circuit.
+        assert_eq!(circuit_ref.num_parameters(), 0);
+
+        let Some(Parameters::Blocks(block_ids)) = inst.params.as_deref() else {
+            panic!("expected the loop to carry its body as a block")
+        };
+        assert_eq!(circuit_ref.blocks()[block_ids[0]].data().len(), 2);
+
+        let body_ref = unsafe { const_ptr_as_ref(body) };
+        assert_eq!(body_ref.data().len(), 2); // The body was copied, not consumed
+
+        unsafe {
+            qk_circuit_free(circuit);
+            qk_circuit_free(body);
+            qk_param_free(param);
+        }
+    }
+
+    #[test]
+    fn test_circuit_for_loop_elements() {
+        let circuit = qk_circuit_new(3, 0);
+        let name = CString::new("i").unwrap();
+        let param = unsafe { qk_param_new_symbol(name.as_ptr()) };
+        let body = parameterized_body(param);
+
+        let qubits = [2_u32, 0];
+        let values = [1_isize, 3, 7];
+        let elements = CLoopElements {
+            elements: values.as_ptr(),
+            len: values.len(),
+        };
+        let loop_param = CLoopParam {
+            kind: CLoopParamKind::Parameter,
+            value: CLoopParamValue { parameter: param },
+        };
+        let exit_code = unsafe {
+            qk_circuit_for_loop_elements(
+                circuit,
+                body,
+                qubits.as_ptr(),
+                ptr::null(),
+                elements,
+                loop_param,
+            )
+        };
+        assert_eq!(exit_code, ExitCode::Success);
+
+        let circuit_ref = unsafe { const_ptr_as_ref(circuit) };
+        assert_eq!(circuit_ref.data().len(), 1);
+
+        let inst = &circuit_ref.data()[0];
+        assert_eq!(circuit_ref.get_qargs(inst.qubits), [Qubit(2), Qubit(0)]);
+
+        let OperationRef::ControlFlow(cf_inst) = inst.op.view() else {
+            panic!("expected a control flow instruction")
+        };
+        let ControlFlow::ForLoop {
+            collection,
+            loop_param,
+        } = &cf_inst.control_flow
+        else {
+            panic!("expected a for loop")
+        };
+        let ForCollection::List(elements) = collection else {
+            panic!("expected a list collection")
+        };
+        assert_eq!(elements, &[1, 3, 7]);
+
+        let Some(LoopParam::Parameter(symbol)) = loop_param else {
+            panic!("expected a parameter loop variable")
+        };
+        assert_eq!(symbol.name(), "i");
+
+        let Some(Parameters::Blocks(block_ids)) = inst.params.as_deref() else {
+            panic!("expected the loop to carry its body as a block")
+        };
+        assert_eq!(circuit_ref.blocks()[block_ids[0]].data().len(), 2);
+
+        let body_ref = unsafe { const_ptr_as_ref(body) };
+        assert_eq!(body_ref.data().len(), 2); // The body was copied, not consumed
+
+        unsafe {
+            qk_circuit_free(circuit);
+            qk_circuit_free(body);
+            qk_param_free(param);
+        }
     }
 }
