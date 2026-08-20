@@ -2408,7 +2408,8 @@ pub unsafe extern "C" fn qk_circuit_delay(
 /// The body is executed once for every value in the half-open range ``[start, stop)``, stepping
 /// by ``step``, following the same convention as Python's ``range``. All three may be negative,
 /// and a range that yields no values (such as ``start = 5`` and ``stop = 0`` with a positive
-/// ``step``) is valid, appending a loop whose body never executes.
+/// ``step``) is valid, appending a loop whose body never executes. All three must be
+/// representable as ``ptrdiff_t``, which is narrower than ``int64_t`` on 32-bit platforms.
 ///
 /// If ``loop_param`` names a parameter, the current value of the range is bound to it on each
 /// iteration; the parameter must be the same ``QkParam`` that was used to build the body, since
@@ -2435,7 +2436,8 @@ pub unsafe extern "C" fn qk_circuit_delay(
 /// @param loop_param The loop variable to bind each value to, if any.
 ///
 /// @return ``QkExitCode_Success`` upon successful append. Upon failure,
-///     ``QkExitCode_ZeroLoopStep`` indicates a zero ``step``,
+///     ``QkExitCode_ZeroLoopStep`` indicates a zero ``step``, ``QkExitCode_ArithmeticError`` a
+///     ``start``, ``stop`` or ``step`` that is not representable as ``ptrdiff_t``,
 ///     ``QkExitCode_NotImplemented`` a ``QkLoopParamKind_Variable`` loop variable,
 ///     ``QkExitCode_ParameterError`` a ``loop_param`` that is not a plain parameter symbol, and
 ///     ``QkExitCode_ParameterNameConflict`` that a new parameter symbol has a name conflict with
@@ -2479,15 +2481,18 @@ pub unsafe extern "C" fn qk_circuit_for_loop_range(
     step: i64,
     loop_param: CLoopParam,
 ) -> ExitCode {
-    let Some(step) = NonZero::new(step as isize) else {
+    let (Ok(start), Ok(stop), Ok(step)) = (
+        isize::try_from(start),
+        isize::try_from(stop),
+        isize::try_from(step),
+    ) else {
+        return ExitCode::ArithmeticError;
+    };
+    let Some(step) = NonZero::new(step) else {
         return ExitCode::ZeroLoopStep;
     };
 
-    let collection = ForCollection::PyRange(PyRange {
-        start: start as isize,
-        stop: stop as isize,
-        step,
-    });
+    let collection = ForCollection::PyRange(PyRange { start, stop, step });
 
     // SAFETY: Per documentation, the pointers are valid for their documented lengths and
     // the tag correctly discriminates the union.
