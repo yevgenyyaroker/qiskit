@@ -297,10 +297,6 @@ pub union CLoopParamValue {
 ///
 /// The ``kind`` field acts as a discriminant that determines which field of the ``value`` union
 /// is active. When ``kind`` is ``QkLoopParamKind_NoLoopParam``, ``value`` is unused.
-///
-/// Building a for-loop with a ``QkLoopParamKind_Variable`` loop variable is not supported yet, as
-/// a ``QkVar`` cannot be constructed from C; ``qk_circuit_for_loop_range`` and
-/// ``qk_circuit_for_loop_elements`` return ``QkExitCode_NotImplemented`` for it.
 #[repr(C)]
 pub struct CLoopParam {
     /// The kind of loop variable (discriminant for the union)

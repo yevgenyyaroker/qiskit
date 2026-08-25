@@ -74,8 +74,6 @@ pub enum ExitCode {
     ParameterError = 600,
     /// Parameter name conflict.
     ParameterNameConflict = 601,
-    /// The requested functionality is not implemented yet.
-    NotImplemented = 700,
 }
 
 impl From<ArithmeticError> for ExitCode {

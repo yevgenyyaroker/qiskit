@@ -768,7 +768,7 @@ static int test_build_for_loop_over_range(void) {
     uint32_t qubits[2] = {2, 0};
 
     QkExitCode exit_code =
-        qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 1, loop_param);
+        qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 1, &loop_param);
     if (exit_code != QkExitCode_Success) {
         printf("Expected the for-loop to be appended, got exit code %u\n", exit_code);
         result = RuntimeError;
@@ -878,7 +878,7 @@ static int test_build_for_loop_over_elements(void) {
     uint32_t qubits[2] = {0, 1};
 
     QkExitCode exit_code =
-        qk_circuit_for_loop_elements(circuit, body, qubits, NULL, elements, loop_param);
+        qk_circuit_for_loop_elements(circuit, body, qubits, NULL, elements, &loop_param);
     if (exit_code != QkExitCode_Success) {
         printf("Expected the for-loop to be appended, got exit code %u\n", exit_code);
         result = RuntimeError;
@@ -935,9 +935,8 @@ static int test_build_for_loop_invalid_input(void) {
     qk_circuit_gate(body, QkGate_CX, body_qubits, NULL);
     uint32_t qubits[2] = {0, 1};
 
-    QkLoopParam no_param = {QkLoopParamKind_NoLoopParam, {.parameter = NULL}};
     QkExitCode exit_code =
-        qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 0, no_param);
+        qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 0, NULL);
     if (exit_code != QkExitCode_ZeroLoopStep) {
         printf("Expected QkExitCode_ZeroLoopStep for a zero step, got exit code %u\n", exit_code);
         result = EqualityError;
@@ -945,20 +944,10 @@ static int test_build_for_loop_invalid_input(void) {
     }
 
     QkLoopParam value_param = {QkLoopParamKind_Parameter, {.parameter = not_a_symbol}};
-    exit_code = qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 1, value_param);
+    exit_code = qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 1, &value_param);
     if (exit_code != QkExitCode_ParameterError) {
         printf("Expected QkExitCode_ParameterError for a loop parameter that is not a symbol, "
                "got exit code %u\n",
-               exit_code);
-        result = EqualityError;
-        goto cleanup;
-    }
-
-    // A QkVar cannot be built from C yet, so the kind alone is enough to be rejected.
-    QkLoopParam var_param = {QkLoopParamKind_Variable, {.variable = NULL}};
-    exit_code = qk_circuit_for_loop_range(circuit, body, qubits, NULL, 0, 5, 1, var_param);
-    if (exit_code != QkExitCode_NotImplemented) {
-        printf("Expected QkExitCode_NotImplemented for a loop variable, got exit code %u\n",
                exit_code);
         result = EqualityError;
         goto cleanup;
@@ -996,11 +985,10 @@ static int test_build_for_loop_without_loop_param(void) {
 
     ptrdiff_t values[3] = {1, 3, 7};
     QkLoopElements elements = {values, 3};
-    QkLoopParam loop_param = {QkLoopParamKind_NoLoopParam, {.parameter = NULL}};
     uint32_t qubits[2] = {0, 1};
 
     QkExitCode exit_code =
-        qk_circuit_for_loop_elements(circuit, body, qubits, NULL, elements, loop_param);
+        qk_circuit_for_loop_elements(circuit, body, qubits, NULL, elements, NULL);
     if (exit_code != QkExitCode_Success) {
         printf("Expected the for-loop to be appended, got exit code %u\n", exit_code);
         result = RuntimeError;
