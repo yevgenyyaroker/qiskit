@@ -2730,9 +2730,10 @@ pub unsafe extern "C" fn qk_circuit_delay_unit(
 /// @return ``QkExitCode_Success`` upon successful append. Upon failure,
 ///     ``QkExitCode_ZeroLoopStep`` indicates a zero ``step``, ``QkExitCode_ArithmeticError`` a
 ///     ``start``, ``stop`` or ``step`` that is not representable as ``ptrdiff_t``,
-///     ``QkExitCode_CInputError`` a ``QkVar`` that is not ``Uint``-typed or a mismatch between
-///     ``loop_param`` and ``body``'s input variable, ``QkExitCode_ParameterError`` a
-///     ``loop_param`` that is not a plain parameter symbol, and
+///     ``QkExitCode_InvalidLoopVariable`` a ``QkVar`` that is not ``Uint``-typed,
+///     ``QkExitCode_LoopVariableMismatch`` a ``loop_param`` that does not match ``body``'s input
+///     variable, ``QkExitCode_ParameterError`` a ``loop_param`` that is not a plain parameter
+///     symbol, and
 ///     ``QkExitCode_ParameterNameConflict`` that a new parameter symbol has a name conflict with
 ///     an existing one.
 ///
@@ -2822,9 +2823,10 @@ pub unsafe extern "C" fn qk_circuit_for_loop_range(
 ///     value to, or ``NULL`` if the loop has no loop variable.
 ///
 /// @return ``QkExitCode_Success`` upon successful append. Upon failure,
-///     ``QkExitCode_CInputError`` indicates a ``QkVar`` that is not ``Uint``-typed or a mismatch
-///     between ``loop_param`` and ``body``'s input variable, ``QkExitCode_ParameterError`` a
-///     ``loop_param`` that is not a plain parameter symbol, and
+///     ``QkExitCode_InvalidLoopVariable`` indicates a ``QkVar`` that is not ``Uint``-typed,
+///     ``QkExitCode_LoopVariableMismatch`` a ``loop_param`` that does not match ``body``'s input
+///     variable, ``QkExitCode_ParameterError`` a ``loop_param`` that is not a plain parameter
+///     symbol, and
 ///     ``QkExitCode_ParameterNameConflict`` that a new parameter symbol has a name conflict with
 ///     an existing one.
 ///
@@ -2934,7 +2936,7 @@ pub(crate) unsafe fn push_for_loop(
                 // is valid.
                 let var = unsafe { const_ptr_as_ref(c_loop_info.value.variable) };
                 if !matches!(var.ty(), Type::Uint(_)) {
-                    return ExitCode::CInputError;
+                    return ExitCode::InvalidLoopVariable;
                 }
 
                 Some(LoopParam::Variable(var.clone()))
@@ -2950,7 +2952,7 @@ pub(crate) unsafe fn push_for_loop(
         None
     };
     if input_vars.len() > 1 || input_vars.next() != expected {
-        return ExitCode::CInputError;
+        return ExitCode::LoopVariableMismatch;
     }
 
     let num_qubits = body.num_qubits() as u32;
