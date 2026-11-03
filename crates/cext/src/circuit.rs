@@ -2743,8 +2743,16 @@ pub unsafe extern "C" fn qk_circuit_box(
     clbits: *const u32,
     out_inst_idx: *mut usize,
 ) -> ExitCode {
+    // SAFETY: Per documentation, body is non-null, aligned, and owned by the caller.
+    let body = unsafe { Box::from_raw(body) };
+
+    let control_flow = ControlFlow::Box {
+        duration: None,
+        annotations: Default::default(),
+    };
+
     // SAFETY: Per documentation, the pointers are non-null and aligned.
-    unsafe { append_box(circuit, body, qubits, clbits, None, out_inst_idx) }
+    unsafe { push_control_flow(circuit, control_flow, body, qubits, clbits, out_inst_idx) }
 }
 
 /// @ingroup QkCircuit
@@ -2802,12 +2810,20 @@ pub unsafe extern "C" fn qk_circuit_box_duration_info(
     duration: *const CDurationInfo,
     out_inst_idx: *mut usize,
 ) -> ExitCode {
+    // SAFETY: Per documentation, body is non-null, aligned, and owned by the caller.
+    let body = unsafe { Box::from_raw(body) };
+
     // SAFETY: Per documentation, duration is a valid, non null, aligned pointer to a QkDurationInfo.
     let info = unsafe { *duration };
     let duration = Some(BoxDuration::Duration(info.into()));
 
+    let control_flow = ControlFlow::Box {
+        duration,
+        annotations: Default::default(),
+    };
+
     // SAFETY: Per documentation, the pointers are non-null and aligned.
-    unsafe { append_box(circuit, body, qubits, clbits, duration, out_inst_idx) }
+    unsafe { push_control_flow(circuit, control_flow, body, qubits, clbits, out_inst_idx) }
 }
 
 /// @ingroup QkCircuit
@@ -2868,26 +2884,31 @@ pub unsafe extern "C" fn qk_circuit_box_duration_expr(
     duration: *const Expr,
     out_inst_idx: *mut usize,
 ) -> ExitCode {
+    // SAFETY: Per documentation, body is non-null, aligned, and owned by the caller.
+    let body = unsafe { Box::from_raw(body) };
+
     // SAFETY: Per documentation, duration is a valid, non null, aligned pointer to a QkExprNode.
     let info = unsafe { &*duration };
     let duration = Some(BoxDuration::Expr(info.clone()));
 
+    let control_flow = ControlFlow::Box {
+        duration,
+        annotations: Default::default(),
+    };
     // SAFETY: Per documentation, the pointers are non-null and aligned.
-    unsafe { append_box(circuit, body, qubits, clbits, duration, out_inst_idx) }
+    unsafe { push_control_flow(circuit, control_flow, body, qubits, clbits, out_inst_idx) }
 }
 
-unsafe fn append_box(
+unsafe fn push_control_flow(
     circuit: *mut CircuitData,
-    body: *mut CircuitData,
+    control_flow: ControlFlow,
+    body: Box<CircuitData>,
     qubits: *const u32,
     clbits: *const u32,
-    duration: Option<BoxDuration>,
     out_inst_idx: *mut usize,
 ) -> ExitCode {
     // SAFETY: Per documentation, circuit is non-null and aligned.
     let circuit = unsafe { &mut *circuit };
-    // SAFETY: Per documentation, body is non-null, aligned, and owned by the caller.
-    let body = unsafe { Box::from_raw(body) };
 
     let num_qubits = body.num_qubits();
     let num_clbits = body.num_clbits();
@@ -2897,19 +2918,16 @@ unsafe fn append_box(
     // SAFETY: Per documentation, clbits is an array of num_clbits uint32_t elements.
     let cargs = unsafe { cast_to_bit_slice(clbits, num_clbits) };
 
-    let box_block = circuit.add_block(*body);
-    let box_op = PackedOperation::from(ControlFlowInstruction {
-        control_flow: ControlFlow::Box {
-            duration,
-            annotations: Default::default(),
-        },
+    let block = circuit.add_block(*body);
+    let operation = PackedOperation::from(ControlFlowInstruction {
+        control_flow,
         num_qubits: num_qubits as u32,
         num_clbits: num_clbits as u32,
     });
 
     let ret = circuit.push_packed_operation(
-        box_op,
-        Some(Parameters::Blocks(vec![box_block])),
+        operation,
+        Some(Parameters::Blocks(vec![block])),
         qargs,
         cargs,
     );
